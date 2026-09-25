@@ -19,12 +19,8 @@
 --      num_rows * avg_row_len from optimizer statistics. Against table_mb:
 --      ratio above 1 = compression gain (HCC), ratio far below 1 on an uncompressed
 --      heap table = empty space below the high water mark.
--- dml_*
---      DBA_TAB_MODIFICATIONS: DML since the last statistics gathering. Oracle
---      flushes it from memory periodically; the query does not force the flush.
--- created / last_ddl_time
---      DBA_OBJECTS. A drop + re-create resets created. last_ddl_time also moves
---      on grants and other DDL.
+-- Lifecycle (creation, last DDL, DML since last statistics) is collected by
+-- 03b_table_lifecycle.sql, same stack key.
 -- =============================================================================
 WITH
 params AS (
@@ -211,27 +207,6 @@ tabs AS (
   WHERE  t.dropped = 'NO'
   AND    NVL(t.iot_type, 'IOT') = 'IOT'
   AND    t.nested = 'NO'
-),
-st AS (
-  SELECT s.owner, s.table_name, s.stale_stats
-  FROM   dba_tab_statistics s
-         JOIN uc_schema u ON u.username = s.owner
-  WHERE  s.object_type = 'TABLE'
-),
-ob AS (
-  SELECT o.owner, o.object_name, o.created, o.last_ddl_time
-  FROM   dba_objects o
-         JOIN uc_schema u ON u.username = o.owner
-  WHERE  o.object_type = 'TABLE'
-  AND    o.subobject_name IS NULL
-),
-md AS (
-  SELECT m.table_owner, m.table_name, m.inserts, m.updates, m.deletes, m.truncated,
-         m.timestamp                                                             AS last_dml_ts
-  FROM   dba_tab_modifications m
-         JOIN uc_schema u ON u.username = m.table_owner
-  WHERE  m.partition_name    IS NULL
-  AND    m.subpartition_name IS NULL
 )
 SELECT h.collected_utc, h.db_name, h.db_unique_name, h.cdb, h.con_name, h.con_dbid, h.database_role,
        u.uc,
@@ -267,29 +242,14 @@ SELECT h.collected_utc, h.db_name, h.db_unique_name, h.cdb, h.con_name, h.con_db
        NVL(r.n_lob_segments, 0)                                                  AS n_lob_segments,
        NVL(r.n_table_partitions, 0)                                              AS n_table_partitions,
        r.table_compression,
-       -- statistics
+       -- optimizer statistics (DBA_TABLES, already read above)
        t.num_rows,
        t.avg_row_len,
        ROUND(t.num_rows * t.avg_row_len / 1048576, 3)                            AS est_row_data_mb,
-       t.last_analyzed,
-       s.stale_stats,
-       -- lifecycle / activity
-       b.created,
-       b.last_ddl_time,
-       d.inserts                                                                 AS dml_inserts,
-       d.updates                                                                 AS dml_updates,
-       d.deletes                                                                 AS dml_deletes,
-       d.truncated                                                               AS dml_truncated,
-       d.last_dml_ts
+       t.last_analyzed
 FROM   tabs t
        FULL OUTER JOIN tab_roll r ON  r.owner      = t.owner
                                   AND r.table_name = t.table_name
        CROSS JOIN hdr h
-       LEFT JOIN uc_schema u ON u.username    = COALESCE(t.owner, r.owner)
-       LEFT JOIN st        s ON s.owner       = t.owner
-                            AND s.table_name  = t.table_name
-       LEFT JOIN ob        b ON b.owner       = t.owner
-                            AND b.object_name = t.table_name
-       LEFT JOIN md        d ON d.table_owner = t.owner
-                            AND d.table_name  = t.table_name
+       LEFT JOIN uc_schema u ON u.username = COALESCE(t.owner, r.owner)
 ORDER  BY u.uc, u.schema_layer, NVL(r.total_bytes, 0) DESC;

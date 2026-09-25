@@ -11,6 +11,7 @@ A use case owns two schemas, `<UC>_DSSWORK` and `<UC>_DSSOUT`. Each schema has a
 | `01_tablespace_usage.sql` | tablespace (all of them, UC ones flagged) | none |
 | `02_object_usage.sql` | UC object × tablespace (partitions summed) | none |
 | `03_table_usage.sql` | UC table, with indexes, LOBs and partitions rolled up | none |
+| `03b_table_lifecycle.sql` | UC table: creation, last DDL, statistics age, DML since the last statistics | none |
 | `04_awr_tablespace_daily.sql` | tablespace × day, over the AWR retention | Diagnostics Pack |
 | `05_awr_object_activity.sql` | UC object seen by AWR over the last N days (I/O, block changes) | Diagnostics Pack |
 
@@ -64,8 +65,12 @@ Every file's header comment documents its columns and stack key.
   - 05 keeps root snapshots only (`DBID = V$DATABASE.DBID`), so counters aren't doubled.
 - **AWR segment statistics are top-N.** 05 shows hotspots, not an inventory: an object missing from it isn't proven idle. Space growth isn't taken from these rows, because every `TRUNCATE`, `MOVE` or re-create starts a new data object id.
 - **Deferred segment creation.** Tables that never received a row have no segment. They appear in 03 with 0 MB and `segment_created = NO`.
-- **`dml_*` (03)** comes from `DBA_TAB_MODIFICATIONS`: DML since the last statistics gathering. Oracle flushes it from memory periodically, and the queries don't force the flush.
-- **Performance.** 01 scans `DBA_SEGMENTS` once for the whole database. If the dictionary queries are slow, gather dictionary and fixed-object statistics.
+- **`dml_*` (03b)** comes from `DBA_TAB_MODIFICATIONS`: DML since the last statistics gathering. Oracle flushes it from memory periodically, and the queries don't force the flush.
+- **Performance**:
+  - 01 scans `DBA_SEGMENTS` once for the whole database.
+  - Table lifecycle is a separate query (03b), so a slow dictionary can't block the footprint collection. 03b reads each dictionary view once, restricted to the UC owners and materialised, then hash-joins them. Joined directly, these UNION ALL views can receive the join predicate and be re-run for every table row.
+  - `DBA_TAB_STATISTICS` isn't used. Its `STALE_STATS` is computed row by row, and on Exadata real-time statistics add a second row per table (`NOTES = 'STATS_ON_CONVENTIONAL_DML'`). 03b derives `stale_est` from the DML counters instead.
+  - If dictionary queries are still slow, gather dictionary and fixed-object statistics.
 
 ## References
 
@@ -75,3 +80,5 @@ Every file's header comment documents its columns and stack key.
 - DBA_FREE_SPACE slowness caused by the recycle bin: [Connor McDonald](https://connor-mcdonald.com/2020/08/27/finding-free-space-on-your-database-taking-a-long-time/), [Jonathan Lewis](https://jonathanlewis.wordpress.com/2019/08/08/free-space-3/)
 - Recycle bin reused before autoextend: [test on 12.1](https://dbamarco.wordpress.com/2018/01/05/recyclebin-vs-autoextend/), [space pressure behaviour](https://www.dbi-services.com/blog/oracle-space-management-a-recycle-bin/)
 - [V$DATABASE.DBID vs CON_DBID in a PDB](https://www.petefinnigan.com/weblog/archives/00001454.htm)
+- [Join predicate pushdown and why it can be costly](https://blogs.oracle.com/optimizer/optimizer-transformation-join-predicate-pushdown)
+- [Real-time statistics (Exadata only): extra rows in *_TAB_STATISTICS](https://oracle-base.com/articles/19c/real-time-statistics-19c)
